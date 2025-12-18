@@ -481,10 +481,11 @@ const App = () => {
         </div>
     );
 };
-import { creatRoot } from 'react-dom/client';
+import { createRoot } from 'react-dom/client';
 const container = document.getElementById('root');
-const root = creatRoot(container);
-root.render(<MemoryArchive/>);
+const root = createRoot(container);
+root.render(<MemoryArchive />);
 
 export default App;
+
 

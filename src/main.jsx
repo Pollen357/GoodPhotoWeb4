@@ -484,8 +484,9 @@ const App = () => {
 import { createRoot } from 'react-dom/client';
 const container = document.getElementById('root');
 const root = createRoot(container);
-root.render(<MemoryArchive />);
+root.render(<App />);
 
 export default App;
+
 
 

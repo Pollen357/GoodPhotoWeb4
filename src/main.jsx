@@ -1,25 +1,14 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { initializeApp } from 'firebase/app';
 import { 
-    getAuth, 
-    GoogleAuthProvider, 
-    signInWithPopup, 
-    signOut, 
-    onAuthStateChanged, 
-    signInWithCustomToken,
-    signInAnonymously
-} from 'firebase/auth';
-import { 
     getFirestore, 
     collection, 
     onSnapshot, 
     addDoc, 
     deleteDoc, 
-    doc
+    doc 
 } from 'firebase/firestore';
 import { 
-    LogOut, 
-    LogIn, 
     Plus, 
     Trash2, 
     Calendar, 
@@ -32,33 +21,16 @@ import {
     Search, 
     AlertCircle, 
     Check, 
-    ShieldCheck, 
     Download 
 } from 'lucide-react';
 
-/**
- * --- 部署說明 (重要) ---
- * 如果你在自己的環境部署，請將下方的 manualConfig 替換為你在 Firebase Console 取得的配置
- */
-const manualConfig = {
-    apiKey: "", // 填入你的 API Key
-    authDomain: "",
-    projectId: "",
-    storageBucket: "",
-    messagingSenderId: "",
-    appId: ""
-};
-
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'photo-vault-pro';
-const envConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
-const firebaseConfig = (envConfig && envConfig.apiKey) ? envConfig : manualConfig;
-const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+// --- Firebase 配置 ---
+// 從環境變數獲取配置，若在本地運行請確保 __firebase_config 已正確定義
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'photo-vault-public';
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
 
 const App = () => {
     const [db, setDb] = useState(null);
-    const [auth, setAuth] = useState(null);
-    const [user, setUser] = useState(null);
-    const [isAuthReady, setIsAuthReady] = useState(false);
     const [photos, setPhotos] = useState([]);
     const [view, setView] = useState('gallery');
     const [searchQuery, setSearchQuery] = useState('');
@@ -69,59 +41,40 @@ const App = () => {
 
     const fileInputRef = useRef(null);
 
-    // 1. 初始化 Firebase 與 Auth
+    // 1. 初始化 Firebase
     useEffect(() => {
-        if (!firebaseConfig.apiKey && !envConfig) {
-            setMessage({ text: '偵測到 Firebase 配置缺失。請在程式碼中填入 manualConfig 以進行部署。', type: 'error' });
+        if (!firebaseConfig.apiKey) {
+            console.error("Firebase 配置缺失。");
             return;
         }
 
         try {
             const app = initializeApp(firebaseConfig);
-            const authInstance = getAuth(app);
             const dbInstance = getFirestore(app);
-            setAuth(authInstance);
             setDb(dbInstance);
-
-            const unsubscribe = onAuthStateChanged(authInstance, async (currentUser) => {
-                if (currentUser) {
-                    setUser(currentUser);
-                } else if (initialAuthToken) {
-                    try {
-                        const result = await signInWithCustomToken(authInstance, initialAuthToken);
-                        setUser(result.user);
-                    } catch (e) {
-                        console.error("Token Login Failed", e);
-                        // Fallback to allow viewing if public, but we force Google Login for this app
-                    }
-                }
-                setIsAuthReady(true);
-            });
-            return () => unsubscribe();
         } catch (err) {
-            console.error("Firebase Init Error", err);
-            setMessage({ text: 'Firebase 初始化失敗，請檢查 API Key 是否正確。', type: 'error' });
+            console.error("Firebase 初始化失敗", err);
         }
     }, []);
 
-    // 2. 監聽 Firestore 數據
+    // 2. 監聽 Firestore 數據 (使用公共路徑)
     useEffect(() => {
-        if (!isAuthReady || !db || !user) return;
+        if (!db) return;
         
-        const collectionPath = `artifacts/${appId}/users/${user.uid}/photos`;
-        const q = collection(db, collectionPath);
+        // 遵循 Rule 1: 使用公共路徑 /artifacts/{appId}/public/data/{collectionName}
+        const photosCollection = collection(db, 'artifacts', appId, 'public', 'data', 'photos');
 
-        const unsubscribe = onSnapshot(q, (snapshot) => {
+        const unsubscribe = onSnapshot(photosCollection, (snapshot) => {
             setPhotos(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
         }, (err) => {
-            console.error("Firestore Snapshot Error:", err);
+            console.error("讀取數據失敗:", err);
             if (err.code === 'permission-denied') {
-                setMessage({ text: '資料庫讀取被拒絕。請檢查 Firestore 安全規則。', type: 'error' });
+                setMessage({ text: '讀取被拒絕，請檢查 Firestore 安全規則是否允許公共存取。', type: 'error' });
             }
         });
 
         return () => unsubscribe();
-    }, [isAuthReady, db, user]);
+    }, [db]);
 
     // 3. 下載處理
     const handleDownload = (imageData, date) => {
@@ -140,7 +93,7 @@ const App = () => {
 
         const validFiles = files.filter(file => {
             if (file.size > 800000) {
-                setMessage({ text: `檔案 ${file.name} 超過 800KB 限制。請壓縮圖片後再上傳。`, type: 'error' });
+                setMessage({ text: `檔案 ${file.name} 超過 800KB 限制。`, type: 'error' });
                 return false;
             }
             return true;
@@ -165,41 +118,32 @@ const App = () => {
         });
     };
 
-    // 5. 批次上傳 (核心修復：增加更詳細的錯誤攔截)
+    // 5. 批次上傳
     const handleBatchUpload = async (e) => {
         e.preventDefault();
-        if (pendingUploads.length === 0 || isUploading || !user || !db) return;
+        if (pendingUploads.length === 0 || isUploading || !db) return;
 
         setIsUploading(true);
-        setMessage({ text: `正在連線至雲端資料庫...`, type: 'info' });
+        setMessage({ text: `正在上傳至公共相本...`, type: 'info' });
 
         try {
-            const collectionPath = `artifacts/${appId}/users/${user.uid}/photos`;
+            const photosCollection = collection(db, 'artifacts', appId, 'public', 'data', 'photos');
             
             for (const item of pendingUploads) {
-                await addDoc(collection(db, collectionPath), {
+                await addDoc(photosCollection, {
                     imageData: item.previewUrl,
                     date: item.date,
                     timestamp: Date.now(),
-                    fileName: item.file.name,
-                    uid: user.uid
+                    fileName: item.file.name
                 });
             }
             
-            setMessage({ text: '已成功備份至雲端！', type: 'success' });
+            setMessage({ text: '上傳成功！所有人現在都可以看到這些照片。', type: 'success' });
             setPendingUploads([]);
             setTimeout(() => setView('gallery'), 1200);
         } catch (err) {
-            console.error("Upload failed details:", err);
-            let errorText = '儲存失敗。';
-            if (err.code === 'permission-denied') {
-                errorText = '儲存失敗：Firestore 安全規則拒絕寫入。';
-            } else if (err.message.includes('Quota')) {
-                errorText = '儲存失敗：已達 Firebase 免費額度上限。';
-            } else {
-                errorText = `儲存失敗：${err.message}`;
-            }
-            setMessage({ text: errorText, type: 'error' });
+            console.error("上傳失敗:", err);
+            setMessage({ text: `儲存失敗：${err.message}`, type: 'error' });
         } finally {
             setIsUploading(false);
         }
@@ -208,11 +152,11 @@ const App = () => {
     const handleDelete = async (id) => {
         if (!window.confirm('確定要刪除這張照片嗎？')) return;
         try {
-            const docPath = `artifacts/${appId}/users/${user.uid}/photos/${id}`;
-            await deleteDoc(doc(db, docPath));
+            const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'photos', id);
+            await deleteDoc(docRef);
         } catch (err) {
             console.error(err);
-            alert('刪除失敗，請檢查連線。');
+            alert('刪除失敗');
         }
     };
 
@@ -224,44 +168,6 @@ const App = () => {
         return [...filtered].sort((a, b) => (a.date > b.date ? -1 : 1));
     }, [photos, searchQuery]);
 
-    const handleGoogleLogin = async () => {
-        const provider = new GoogleAuthProvider();
-        try {
-            await signInWithPopup(auth, provider);
-        } catch (error) {
-            console.error(error);
-            setMessage({ text: `登入失敗：請確認網域已加入 Firebase 的 Authorized Domains。`, type: 'error' });
-        }
-    };
-
-    if (!user && isAuthReady) {
-        return (
-            <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
-                <div className="max-w-md w-full bg-white rounded-[3rem] shadow-2xl p-12 text-center border border-slate-100">
-                    <div className="w-20 h-20 bg-indigo-600 rounded-[2rem] flex items-center justify-center text-white mx-auto mb-8 shadow-lg transform -rotate-6">
-                        <Camera size={40} />
-                    </div>
-                    <h1 className="text-4xl font-black text-slate-800 mb-4 tracking-tighter">MemoryArchive</h1>
-                    <p className="text-slate-500 mb-10 leading-relaxed font-medium">
-                        您的私人雲端相冊。<br/>請登入以存取您的數據。
-                    </p>
-                    <button 
-                        onClick={handleGoogleLogin}
-                        className="w-full flex items-center justify-center space-x-3 py-4 bg-slate-900 text-white rounded-2xl font-bold hover:bg-slate-800 transition transform active:scale-[0.98] shadow-xl"
-                    >
-                        <LogIn size={20} />
-                        <span>使用 Google 登入</span>
-                    </button>
-                    {message.text && message.type === 'error' && (
-                        <div className="mt-4 p-3 bg-red-50 text-red-600 text-xs rounded-xl font-bold">
-                            {message.text}
-                        </div>
-                    )}
-                </div>
-            </div>
-        );
-    }
-
     return (
         <div className="min-h-screen bg-[#fafafa] text-slate-900 font-sans flex flex-col">
             <nav className="fixed top-0 w-full bg-white/80 backdrop-blur-xl border-b border-slate-100 z-50">
@@ -270,7 +176,7 @@ const App = () => {
                         <div className="w-9 h-9 bg-indigo-600 rounded-xl flex items-center justify-center text-white shadow-sm">
                             <Camera size={20} />
                         </div>
-                        <span className="text-xl font-black tracking-tighter text-slate-800 hidden xs:block">MemoryArchive</span>
+                        <span className="text-xl font-black tracking-tighter text-slate-800">MemoryArchive</span>
                     </div>
                     
                     <div className="flex items-center space-x-4 md:space-x-8">
@@ -282,11 +188,6 @@ const App = () => {
                             <Plus size={20} />
                             <span className="hidden sm:block">新增相片</span>
                         </button>
-                        <div className="h-5 w-[1.5px] bg-slate-100"></div>
-                        <div className="flex items-center space-x-3">
-                            {user?.photoURL && <img src={user.photoURL} className="w-8 h-8 rounded-full border border-slate-200" alt="Profile" />}
-                            <button onClick={() => signOut(auth)} className="text-slate-300 hover:text-red-500 transition-colors"><LogOut size={18} /></button>
-                        </div>
                     </div>
                 </div>
             </nav>
@@ -296,8 +197,8 @@ const App = () => {
                     <div className="space-y-10 animate-in fade-in duration-700">
                         <div className="flex flex-col md:flex-row md:items-end justify-between gap-6">
                             <div className="space-y-2">
-                                <h2 className="text-4xl font-black text-slate-900 tracking-tight">我的回憶</h2>
-                                <p className="text-slate-400 font-medium">已安全儲存 {photos.length} 份照片。</p>
+                                <h2 className="text-4xl font-black text-slate-900 tracking-tight">公共相簿</h2>
+                                <p className="text-slate-400 font-medium">目前共有 {photos.length} 張相片。</p>
                             </div>
                             <div className="relative w-full md:w-80">
                                 <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={18} />
@@ -339,8 +240,8 @@ const App = () => {
                         <div className="bg-white rounded-[3.5rem] shadow-2xl p-10 md:p-16 border border-slate-50">
                             <div className="text-center mb-14">
                                 <Plus size={36} className="text-indigo-600 mx-auto mb-6" />
-                                <h2 className="text-4xl font-black text-slate-900 mb-4 tracking-tight">匯入時刻</h2>
-                                <p className="text-slate-400 font-medium font-bold">同步您的回憶到雲端資料庫。</p>
+                                <h2 className="text-4xl font-black text-slate-900 mb-4 tracking-tight">新增照片</h2>
+                                <p className="text-slate-400 font-medium font-bold">上傳照片到公共區域。</p>
                             </div>
 
                             <div className="space-y-12">
@@ -377,7 +278,7 @@ const App = () => {
                                 <div className="flex flex-col sm:flex-row space-y-4 sm:space-y-0 sm:space-x-6 pt-6">
                                     <button onClick={() => { setPendingUploads([]); setView('gallery'); }} className="flex-1 py-5 px-8 border border-slate-200 rounded-2xl text-slate-500 font-bold hover:bg-slate-50 transition-all">取消</button>
                                     <button onClick={handleBatchUpload} disabled={pendingUploads.length === 0 || isUploading} className="flex-[2] py-5 px-8 bg-indigo-600 text-white rounded-2xl font-black shadow-2xl hover:bg-indigo-700 disabled:opacity-50 transition transform active:scale-[0.98]">
-                                        {isUploading ? '正在儲存回憶...' : `確認儲存 ${pendingUploads.length} 張相片`}
+                                        {isUploading ? '正在儲存照片...' : `確認儲存 ${pendingUploads.length} 張相片`}
                                     </button>
                                 </div>
                             </div>
@@ -389,7 +290,7 @@ const App = () => {
             <footer className="py-14 border-t border-slate-100 bg-white">
                 <div className="max-w-6xl mx-auto px-6 text-center">
                     <p className="text-slate-400 text-sm font-bold tracking-tight">MemoryArchive &copy; 2024</p>
-                    <p className="text-slate-200 text-[9px] mt-2 tracking-[0.3em] uppercase font-black italic">Cloud storage for your most precious moments</p>
+                    <p className="text-slate-200 text-[9px] mt-2 tracking-[0.3em] uppercase font-black italic">Public storage version</p>
                 </div>
             </footer>
         </div>
@@ -399,6 +300,5 @@ import { createRoot } from 'react-dom/client';
 const container = document.getElementById('root');
 const root = createRoot(container);
 root.render(<App />);
-
 
 export default App;
